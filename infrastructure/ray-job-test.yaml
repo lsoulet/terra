@@ -1,0 +1,16 @@
+apiVersion: ray.io/v1
+kind: RayJob
+metadata:
+  name: terra-test-job
+spec:
+  entrypoint: python test_ray_cluster.py
+  shutdownAfterJobFinishes: false
+  clusterSelector:
+    ray.io/cluster: terra-ray-cluster
+  submitterPodTemplate:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: ray-job-submitter
+          image: terra:latest
+          imagePullPolicy: IfNotPresent

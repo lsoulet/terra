@@ -1,0 +1,52 @@
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: terra-ray-cluster
+  labels:
+    app: terra-ray-cluster
+spec:
+  rayVersion: "2.56.1"
+  headGroupSpec:
+    rayStartParams:
+      dashboard-host: "0.0.0.0"
+    template:
+      spec:
+        containers:
+          - name: ray-head
+            image: terra:latest
+            imagePullPolicy: IfNotPresent
+            resources:
+              requests:
+                cpu: "2"
+                memory: "4Gi"
+              limits:
+                cpu: "2"
+                memory: "4Gi"
+            ports:
+              - containerPort: 6379
+                name: gcs
+              - containerPort: 8265
+                name: dashboard
+              - containerPort: 10001
+                name: client
+  workerGroupSpecs:
+    - groupName: gpu-workers
+      replicas: 1
+      minReplicas: 1
+      maxReplicas: 1
+      rayStartParams: {}
+      template:
+        spec:
+          containers:
+            - name: ray-worker
+              image: terra:latest
+              imagePullPolicy: IfNotPresent
+              resources:
+                requests:
+                  cpu: "4"
+                  memory: "8Gi"
+                  nvidia.com/gpu: "1"
+                limits:
+                  cpu: "4"
+                  memory: "8Gi"
+                  nvidia.com/gpu: "1"

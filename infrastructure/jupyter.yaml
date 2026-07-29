@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: terra-jupyter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: terra-jupyter
+  template:
+    metadata:
+      labels:
+        app: terra-jupyter
+    spec:
+      containers:
+        - name: jupyter
+          image: terra:latest
+          imagePullPolicy: IfNotPresent
+          command: ["jupyter", "lab", "--ip=0.0.0.0", "--port=8888", "--no-browser", "--allow-root"]
+          env:
+            - name: RAY_ADDRESS
+              value: "ray://terra-ray-cluster-head-svc:10001"
+          ports:
+            - containerPort: 8888
+              name: jupyter
+          resources:
+            requests:
+              cpu: "2"
+              memory: "4Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: terra-jupyter-svc
+spec:
+  selector:
+    app: terra-jupyter
+  ports:
+    - port: 8888
+      targetPort: 8888

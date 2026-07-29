@@ -53,6 +53,26 @@ Once the container is running, check:
 
 In application code, always connect with `ray.init(address="auto")` rather than a bare `ray.init()` — this attaches to whatever cluster is already running (local single-node today, a future KubeRay-managed cluster on Kubernetes) without any code changes.
 
+## Distributed tiling
+
+`distributed_tiling.py` splits a Sentinel-2 L1C scene into 64x64 tiles in parallel with Ray, saved as `.npy` files under `data/sentinel2_tiles/` (gitignored/dockerignored — generated data, not committed). It's self-contained: it looks up a low-cloud scene itself via the public Earth Search STAC API and reads each band directly over HTTPS (no local download, no shared storage needed between pods — see `data/pull_sentinel_scene.py` instead if you just want a local copy of the scene to explore in a notebook).
+
+Pass `--max-rows N` to only process the first N tile-rows (~171 tiles each) — useful for a quick/demo-sized run instead of the full scene (~29,000 tiles, ~26 minutes).
+
+**In Docker:**
+```bash
+docker exec terra-ray python distributed_tiling.py              # full scene, ~26 min
+docker exec terra-ray python distributed_tiling.py --max-rows 30  # demo-sized, ~1 min
+```
+
+**On KubeRay ("prod"):**
+```bash
+kubectl delete rayjob terra-tiling-job --ignore-not-found
+kubectl apply -f infrastructure/ray-job-tiling.yaml   # runs with --max-rows 30 by default
+kubectl get rayjob terra-tiling-job -w
+kubectl logs -l job-name=terra-tiling-job
+```
+
 ## Kubernetes / KubeRay (production-like testing)
 
 `infrastructure/` holds a second, separate environment: a local Kubernetes cluster (minikube) running a `RayCluster` via the KubeRay operator, with its own Jupyter pod. It exists alongside the Docker environment above, deliberately, with a distinct purpose:
@@ -118,4 +138,10 @@ kubectl delete rayjob terra-test-job --ignore-not-found
 kubectl apply -f infrastructure/ray-job-test.yaml
 kubectl get rayjob terra-test-job -w
 kubectl logs -l job-name=terra-test-job
+
+# Run the distributed tiling job against the "prod" (KubeRay) cluster
+kubectl delete rayjob terra-tiling-job --ignore-not-found
+kubectl apply -f infrastructure/ray-job-tiling.yaml
+kubectl get rayjob terra-tiling-job -w
+kubectl logs -l job-name=terra-tiling-job
 ```

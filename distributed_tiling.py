@@ -14,8 +14,12 @@ One task per tile (3 HTTP requests each) was tried first and was far too slow
 (network latency per request dominates) -- instead, each Ray task reads one
 full tile-row per band (3 requests for a whole row of tiles) and slices it
 into individual tiles in memory, cutting the request count by ~n_cols. Tasks
-request a small fraction of a CPU each since they're network-bound, not
-compute-bound, letting Ray overlap far more of them than there are cores.
+request a fraction of a CPU each since they're network-bound, not purely
+compute-bound, letting Ray overlap more of them than there are cores -- but
+not too many: each task's JP2000 decompression genuinely uses ~100-200MB, and
+since these tasks don't request a GPU, Ray is free to schedule them on the
+lightweight head node (4Gi) as well as the worker (8Gi), so concurrency is
+kept modest enough to avoid OOM on the smaller of the two.
 """
 
 import argparse
@@ -61,8 +65,13 @@ def read_band_row(url, row, width):
         return src.read(1, window=window)
 
 
-@ray.remote(num_cpus=0.1)
+@ray.remote(num_cpus=0.25)
 def extract_tile_row(urls, row, n_cols):
+    # Each task may land on a different pod/node than the driver, with its own
+    # local disk -- create the output dir here too rather than assuming the
+    # driver's mkdir() is visible.
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
     width = n_cols * TILE_SIZE
     row_rgb = np.stack(
         [read_band_row(urls[c], row, width) for c in ("red", "green", "blue")],
@@ -70,12 +79,14 @@ def extract_tile_row(urls, row, n_cols):
     )
 
     names = []
+    total_bytes = 0
     for col in range(n_cols):
         tile = row_rgb[:, col * TILE_SIZE : (col + 1) * TILE_SIZE, :]
         out_path = OUTPUT_DIR / f"tile_{row:03d}_{col:03d}.npy"
         np.save(out_path, tile)
         names.append(out_path.name)
-    return names
+        total_bytes += out_path.stat().st_size
+    return names, total_bytes
 
 
 if __name__ == "__main__":
@@ -106,6 +117,6 @@ if __name__ == "__main__":
     results = ray.get(futures)
     elapsed = time.time() - start
 
-    all_names = [name for row_names in results for name in row_names]
-    total_size = sum((OUTPUT_DIR / name).stat().st_size for name in all_names)
+    all_names = [name for row_names, _ in results for name in row_names]
+    total_size = sum(row_bytes for _, row_bytes in results)
     print(f"Done: {len(all_names)} tiles in {elapsed:.1f}s ({total_size / 1e6:.1f} MB total)")

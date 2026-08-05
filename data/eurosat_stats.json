@@ -8,5 +8,17 @@
     0.20484785735607147,
     0.1395629346370697,
     0.11792959272861481
+  ],
+  "classes": [
+    "AnnualCrop",
+    "Forest",
+    "HerbaceousVegetation",
+    "Highway",
+    "Industrial",
+    "Pasture",
+    "PermanentCrop",
+    "Residential",
+    "River",
+    "SeaLake"
   ]
 }

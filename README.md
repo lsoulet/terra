@@ -6,9 +6,26 @@ Satellite land-use classification with distributed processing: split large Senti
 
 - Docker, with your user in the `docker` group (`sudo usermod -aG docker $USER`, then reconnect your session for it to take effect)
 - An NVIDIA GPU with the driver installed on the host (`nvidia-smi` should work)
-- Docker's CDI device support enabled — GPU access uses `--device=nvidia.com/gpu=all` rather than the older `--gpus all` flag
+- Docker's CDI device support enabled — GPU access uses `--device=nvidia.com/gpu=all` rather than the older `--gpus all` flag. If `--gpus`-based commands fail with `AMD CDI spec not found` (a red herring — no AMD hardware involved), run `sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker` first (this restarts the Docker daemon, stopping any running containers).
 
-## Building the image
+## Two environments
+
+This repo runs on two separate, deliberately distinct environments:
+
+| Environment | Purpose | Filesystem | Jupyter |
+|---|---|---|---|
+| **Docker** (`terra-ray`) | Day-to-day dev, fast iteration | Live bind mount of the repo | `http://127.0.0.1:8888/lab` |
+| **KubeRay** (minikube) | Production-like testing (e.g. `RayJob` runs) | Baked into the image at build time — rebuild + reload to update | `http://127.0.0.1:8890/lab` (via `kubectl port-forward`) |
+
+The intended flow: prototype interactively in the Docker Jupyter, then once code is ready, submit it as a script against the KubeRay cluster (e.g. via `RayJob`) to validate it in a more production-shaped setting.
+
+In application code, always connect with `ray.init(address="auto")` rather than a bare `ray.init()` — this attaches to whatever cluster is already running (Docker's single-node cluster or the KubeRay-managed one) without any code changes.
+
+---
+
+## Docker environment
+
+### Build
 
 ```bash
 docker build -t terra:latest .
@@ -16,10 +33,11 @@ docker build -t terra:latest .
 
 The image installs `requirements.txt` (including `torch` with bundled CUDA runtime and `ray[default]`) on top of `python:3.12-slim`. No CUDA toolkit is baked into the image — only the host's NVIDIA driver and CDI passthrough are required.
 
-## Running the stack
+### Run
 
 ```bash
 docker run -it --rm \
+  --name terra-ray \
   --device=nvidia.com/gpu=all \
   -p 8888:8888 \
   -p 8265:8265 \
@@ -29,8 +47,6 @@ docker run -it --rm \
 
 The container's entrypoint (`entrypoint.sh`) starts a single-node Ray cluster (`ray start --head`) and then launches Jupyter Lab. The whole repo is bind-mounted at `/app`, so notebooks, `data/`, and `models/` are all live without rebuilding the image.
 
-### Ports
-
 | Container port | Purpose |
 |---|---|
 | 8888 | Jupyter Lab |
@@ -39,30 +55,46 @@ The container's entrypoint (`entrypoint.sh`) starts a single-node Ray cluster (`
 
 If you're working over VSCode Remote-SSH, forward ports 8888 and 8265 from the "PORTS" panel (`Ctrl+Shift+P` → "Forward a Port") to reach them from your local browser.
 
-## Testing the cluster
+### Test the cluster
 
-Once the container is running, check:
-
-1. **Jupyter** — open the `http://127.0.0.1:8888/lab?token=...` URL printed in the container logs (`docker logs <container>`).
+1. **Jupyter** — open the `http://127.0.0.1:8888/lab?token=...` URL printed in the container logs (`docker logs terra-ray`).
 2. **Ray dashboard** — open `http://localhost:8265`.
-3. **Cluster smoke test** — run `test_ray_cluster.py`, either from a terminal:
+3. **Cluster smoke test**:
    ```bash
-   docker exec <container> python test_ray_cluster.py
+   docker exec terra-ray python test_ray_cluster.py
    ```
-   or from a Jupyter cell (`%run test_ray_cluster.py`). It checks that `ray.init(address="auto")` connects, that tasks actually run in parallel, and that a GPU-declared Ray actor can see the GPU via `torch.cuda.is_available()`.
+   (or from a Jupyter cell: `%run test_ray_cluster.py`). It checks that `ray.init(address="auto")` connects, that tasks actually run in parallel, and that a GPU-declared Ray actor can see the GPU via `torch.cuda.is_available()`.
 
-In application code, always connect with `ray.init(address="auto")` rather than a bare `ray.init()` — this attaches to whatever cluster is already running (local single-node today, a future KubeRay-managed cluster on Kubernetes) without any code changes.
+### Distributed tiling
 
-## Kubernetes / KubeRay (production-like testing)
+`distributed_tiling.py` splits a Sentinel-2 L1C scene into 64x64 tiles in parallel with Ray, saved as `.npy` files under `data/sentinel2_tiles/` (gitignored/dockerignored — generated data, not committed). It's self-contained: it looks up a low-cloud scene itself via the public Earth Search STAC API and reads each band directly over HTTPS (no local download needed — see `data/pull_sentinel_scene.py` instead if you just want a local copy of the scene to explore in a notebook).
 
-`infrastructure/` holds a second, separate environment: a local Kubernetes cluster (minikube) running a `RayCluster` via the KubeRay operator, with its own Jupyter pod. It exists alongside the Docker environment above, deliberately, with a distinct purpose:
+```bash
+docker exec terra-ray python distributed_tiling.py                # full scene, ~29,000 tiles, ~8 min
+docker exec terra-ray python distributed_tiling.py --max-rows 30  # demo-sized, ~5,000 tiles, ~1 min
+```
 
-| Environment | Purpose | Filesystem | Jupyter |
-|---|---|---|---|
-| Docker (`terra-ray`) | Day-to-day dev, fast iteration | Live bind mount of the repo | `http://127.0.0.1:8888/lab` |
-| KubeRay (minikube) | Production-like testing (e.g. `RayJob` runs) | Baked into the image at build time — rebuild + `minikube image load` to update | `http://127.0.0.1:8890/lab` (via `kubectl port-forward`) |
+### Operations
 
-The intended flow: prototype interactively in the Docker Jupyter, then once code is ready, submit it as a script against the KubeRay cluster (e.g. via `RayJob`) to validate it in a more production-shaped setting — not the other way around, and not by running two copies of the same notebook workflow.
+```bash
+# Status
+docker ps -a --filter name=terra-ray
+
+# Start
+docker start terra-ray
+
+# Stop
+docker stop terra-ray
+
+# Restart
+docker restart terra-ray
+```
+
+---
+
+## Kubernetes / KubeRay environment
+
+A local Kubernetes cluster (minikube) running a `RayCluster` via the KubeRay operator, with its own Jupyter pod — separate from the Docker environment above.
 
 ### Setup
 
@@ -71,16 +103,17 @@ minikube start --driver=docker --gpus=all --cpus=8 --memory=16g
 helm repo add kuberay https://ray-project.github.io/kuberay-helm/
 helm install kuberay-operator kuberay/kuberay-operator --version 1.6.2 -f infrastructure/kuberay-operator-values.yaml
 minikube image load terra:latest
+kubectl apply -f infrastructure/tiles-pvc.yaml
 kubectl apply -f infrastructure/ray-cluster.yaml
 kubectl apply -f infrastructure/jupyter.yaml
 kubectl port-forward svc/terra-jupyter-svc 8890:8888
 ```
 
-Note: `docker run --gpus all` (and therefore `minikube start --gpus=all`) requires a `nvidia` runtime registered with Docker — if it fails with `AMD CDI spec not found`, run `sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker` first (this restarts the Docker daemon, stopping any running containers, including `terra-ray`).
+`tiles-pvc.yaml` is a shared volume (mounted at the same path on the head, worker, and Jupyter pods) for `distributed_tiling.py`'s output — without it, each pod writes tiles to its own local disk, and a `RayJob` can report `SUCCEEDED` while the output ends up scattered across pods with no single place containing all of it.
 
 ### Updating the image
 
-After code changes, the KubeRay pods need to be pointed at a fresh image — reloading alone is not enough if pods are already running on the old one:
+After code changes, rebuild and point the cluster at the fresh image:
 
 ```bash
 docker build -t terra:latest .
@@ -88,34 +121,54 @@ minikube image load terra:latest
 kubectl delete pods -l ray.io/cluster=terra-ray-cluster -l app=terra-jupyter
 ```
 
-`minikube image load` silently keeps the old image if a container is still using that tag, so pods must be deleted (they get recreated automatically) for the new image to actually take effect.
+Two gotchas, both requiring the pod-deletion step above (and sometimes more) to actually take effect:
+- `minikube image load` silently keeps the old image if a container is still using that tag — pods must be deleted so they get recreated on the new one.
+- Even after that, the kubelet can still report a stale `imageID` for a freshly-created pod (a caching layer independent of both Docker and the CRI tool). If pods keep running old code despite the steps above, restart the kubelet directly: `minikube ssh -- "sudo systemctl restart kubelet"`, then delete the pods again.
 
-### Operations cheat sheet
+### Test the cluster
+
+```bash
+kubectl delete rayjob terra-test-job --ignore-not-found
+kubectl apply -f infrastructure/ray-job-test.yaml
+kubectl get rayjob terra-test-job -w
+kubectl logs -l job-name=terra-test-job
+```
+
+Checks the same things as the Docker smoke test (`test_ray_cluster.py`), but submitted as a `RayJob` against the persistent `terra-ray-cluster`.
+
+### Distributed tiling
+
+Same script as the Docker environment, submitted as a `RayJob` (runs with `--max-rows 30` by default — see `infrastructure/ray-job-tiling.yaml`):
+
+```bash
+kubectl delete rayjob terra-tiling-job --ignore-not-found
+kubectl apply -f infrastructure/ray-job-tiling.yaml
+kubectl get rayjob terra-tiling-job -w
+kubectl logs -l job-name=terra-tiling-job
+```
+
+A `SUCCEEDED` status only means no task raised an exception — it doesn't guarantee the output is complete or in one place. Verify the tile count directly:
+
+```bash
+kubectl exec deploy/terra-jupyter -- sh -c "ls data/sentinel2_tiles/*.npy | wc -l"
+```
+
+### Operations
 
 ```bash
 # Status
-docker ps -a --filter name=terra-ray
 minikube status
 kubectl get raycluster
 kubectl get pods
 kubectl get rayjob
 
 # Start
-docker start terra-ray
 minikube start
 kubectl port-forward svc/terra-jupyter-svc 8890:8888 &
 
 # Stop
-docker stop terra-ray
 minikube stop
 
 # Restart
-docker restart terra-ray
 minikube stop && minikube start
-
-# Run a test job against the "prod" (KubeRay) cluster
-kubectl delete rayjob terra-test-job --ignore-not-found
-kubectl apply -f infrastructure/ray-job-test.yaml
-kubectl get rayjob terra-test-job -w
-kubectl logs -l job-name=terra-test-job
 ```

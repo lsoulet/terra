@@ -30,6 +30,13 @@ spec:
             limits:
               cpu: "2"
               memory: "4Gi"
+          volumeMounts:
+            - name: tiles
+              mountPath: /app/data/sentinel2_tiles
+      volumes:
+        - name: tiles
+          persistentVolumeClaim:
+            claimName: terra-tiles-pvc
 ---
 apiVersion: v1
 kind: Service

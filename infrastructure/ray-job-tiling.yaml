@@ -1,0 +1,16 @@
+apiVersion: ray.io/v1
+kind: RayJob
+metadata:
+  name: terra-tiling-job
+spec:
+  entrypoint: python distributed_tiling.py --max-rows 30
+  shutdownAfterJobFinishes: false
+  clusterSelector:
+    ray.io/cluster: terra-ray-cluster
+  submitterPodTemplate:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: ray-job-submitter
+          image: terra:latest
+          imagePullPolicy: IfNotPresent

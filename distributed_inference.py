@@ -25,15 +25,17 @@ import mlflow
 import numpy as np
 import ray
 
-MLFLOW_TRACKING_DIR = Path("mlruns")
+# OUTPUTS_DIR is the PVC mount point on KubeRay -- tiles, land-use maps, and
+# MLflow's tracking store are siblings under it (not nested inside each
+# other), each getting their own subfolder purely by what they are. Anything
+# outside OUTPUTS_DIR is baked into the image at build time, not shared
+# across pods, so results saved elsewhere would be stuck on whichever pod
+# happened to run the driver.
+OUTPUTS_DIR = Path("data/outputs")
+TILES_DIR = OUTPUTS_DIR / "sentinel2_tiles"
+MAPS_DIR = OUTPUTS_DIR / "land_use_maps"
+MLFLOW_TRACKING_DIR = OUTPUTS_DIR / "mlruns"
 MLFLOW_EXPERIMENT = "terra-land-use-inference"
-
-TILES_DIR = Path("data/sentinel2_tiles")
-# Grid outputs live inside TILES_DIR (not a sibling of it) deliberately: on
-# KubeRay, only TILES_DIR is backed by the shared PVC -- saving here rather
-# than in TILES_DIR.parent keeps the result visible from every pod instead of
-# stuck on whichever one happened to run the driver.
-MAPS_DIR = TILES_DIR / "land_use_maps"
 CHECKPOINT_PATH = Path("models/resnet18_eurosat_best.pt")
 STATS_PATH = Path("data/eurosat_stats.json")
 REFLECTANCE_MAX = 3000
@@ -124,6 +126,17 @@ if __name__ == "__main__":
     # local file, no separate server, but on the actively maintained path.
     MLFLOW_TRACKING_DIR.mkdir(exist_ok=True)
     mlflow.set_tracking_uri(f"sqlite:///{MLFLOW_TRACKING_DIR.resolve()}/mlflow.db")
+
+    # A new experiment's default artifact_location is relative to the
+    # current working directory, NOT to the tracking store's location --
+    # left implicit, it silently recreates a stray ./mlruns wherever the
+    # script happens to run from. Pin it explicitly, once, at creation time.
+    client = mlflow.MlflowClient()
+    if client.get_experiment_by_name(MLFLOW_EXPERIMENT) is None:
+        client.create_experiment(
+            MLFLOW_EXPERIMENT,
+            artifact_location=str(MLFLOW_TRACKING_DIR.resolve() / "artifacts"),
+        )
     mlflow.set_experiment(MLFLOW_EXPERIMENT)
 
     with mlflow.start_run():

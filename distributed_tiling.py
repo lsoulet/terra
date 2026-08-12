@@ -33,14 +33,17 @@ import ray
 from pystac_client import Client
 from rasterio.windows import Window
 
-MLFLOW_TRACKING_DIR = Path("mlruns")
-MLFLOW_EXPERIMENT = "terra-distributed-tiling"
-
 STAC_URL = "https://earth-search.aws.element84.com/v1"
 COLLECTION = "sentinel-2-l1c"
 BBOX = [2.0, 48.6, 2.7, 49.0]  # Paris area
 TILE_SIZE = 64
-OUTPUT_DIR = Path("data/sentinel2_tiles")
+# OUTPUTS_DIR is the PVC mount point on KubeRay -- tiles, land-use maps, and
+# MLflow's tracking store are siblings under it (not nested inside each
+# other), each getting their own subfolder purely by what they are.
+OUTPUTS_DIR = Path("data/outputs")
+OUTPUT_DIR = OUTPUTS_DIR / "sentinel2_tiles"
+MLFLOW_TRACKING_DIR = OUTPUTS_DIR / "mlruns"
+MLFLOW_EXPERIMENT = "terra-distributed-tiling"
 
 
 def s3_to_https(href):
@@ -105,6 +108,17 @@ if __name__ == "__main__":
 
     MLFLOW_TRACKING_DIR.mkdir(exist_ok=True)
     mlflow.set_tracking_uri(f"sqlite:///{MLFLOW_TRACKING_DIR.resolve()}/mlflow.db")
+
+    # A new experiment's default artifact_location is relative to the
+    # current working directory, NOT to the tracking store's location --
+    # left implicit, it silently recreates a stray ./mlruns wherever the
+    # script happens to run from. Pin it explicitly, once, at creation time.
+    client = mlflow.MlflowClient()
+    if client.get_experiment_by_name(MLFLOW_EXPERIMENT) is None:
+        client.create_experiment(
+            MLFLOW_EXPERIMENT,
+            artifact_location=str(MLFLOW_TRACKING_DIR.resolve() / "artifacts"),
+        )
     mlflow.set_experiment(MLFLOW_EXPERIMENT)
 
     with mlflow.start_run():

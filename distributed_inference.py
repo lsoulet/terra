@@ -17,11 +17,16 @@ and clipped to [0,1] -- an approximation of EuroSAT's unknown original scale,
 but applied identically to every tile.
 """
 
+import time
 from collections import Counter
 from pathlib import Path
 
+import mlflow
 import numpy as np
 import ray
+
+MLFLOW_TRACKING_DIR = Path("mlruns")
+MLFLOW_EXPERIMENT = "terra-land-use-inference"
 
 TILES_DIR = Path("data/sentinel2_tiles")
 # Grid outputs live inside TILES_DIR (not a sibling of it) deliberately: on
@@ -114,43 +119,74 @@ class TileClassifier:
 if __name__ == "__main__":
     ray.init(address="auto")
 
-    tile_paths = sorted(str(p) for p in TILES_DIR.glob("*.npy"))
-    print(f"Classifying {len(tile_paths)} tiles...")
+    # Plain filesystem tracking ("file:...") is in maintenance mode as of
+    # MLflow 3.x -- SQLite is the lightweight alternative: still a single
+    # local file, no separate server, but on the actively maintained path.
+    MLFLOW_TRACKING_DIR.mkdir(exist_ok=True)
+    mlflow.set_tracking_uri(f"sqlite:///{MLFLOW_TRACKING_DIR.resolve()}/mlflow.db")
+    mlflow.set_experiment(MLFLOW_EXPERIMENT)
 
-    classifier = TileClassifier.remote()
+    with mlflow.start_run():
+        mlflow.log_params({
+            "reflectance_max": REFLECTANCE_MAX,
+            "smoothing_window": SMOOTHING_WINDOW,
+            "batch_size": BATCH_SIZE,
+        })
 
-    futures = [
-        classifier.classify_batch.remote(tile_paths[i : i + BATCH_SIZE])
-        for i in range(0, len(tile_paths), BATCH_SIZE)
-    ]
-    results = ray.get(futures)
-    predictions = [item for batch in results for item in batch]
+        tile_paths = sorted(str(p) for p in TILES_DIR.glob("*.npy"))
+        print(f"Classifying {len(tile_paths)} tiles...")
+        mlflow.log_param("n_tiles", len(tile_paths))
 
-    counts = {}
-    for _, cls in predictions:
-        counts[cls] = counts.get(cls, 0) + 1
+        classifier = TileClassifier.remote()
 
-    print(f"Classified {len(predictions)} tiles. Predicted class counts:")
-    for cls, count in sorted(counts.items(), key=lambda x: -x[1]):
-        print(f"  {cls:25s} {count}")
+        start = time.time()
+        futures = [
+            classifier.classify_batch.remote(tile_paths[i : i + BATCH_SIZE])
+            for i in range(0, len(tile_paths), BATCH_SIZE)
+        ]
+        results = ray.get(futures)
+        elapsed = time.time() - start
+        predictions = [item for batch in results for item in batch]
 
-    # Reassemble a 2D (row x col) map from "tile_ROW_COL" filenames, and
-    # smooth it with a majority filter to unify tiles into coherent regions.
-    parsed = []
-    for name, cls in predictions:
-        _, row_str, col_str = name.split("_")
-        parsed.append((int(row_str), int(col_str), cls))
+        counts = {}
+        for _, cls in predictions:
+            counts[cls] = counts.get(cls, 0) + 1
 
-    n_rows = max(row for row, _, _ in parsed) + 1
-    n_cols = max(col for _, col, _ in parsed) + 1
-    grid = np.full((n_rows, n_cols), "", dtype=object)
-    for row, col, cls in parsed:
-        grid[row, col] = cls
+        print(f"Classified {len(predictions)} tiles in {elapsed:.1f}s. Predicted class counts:")
+        for cls, count in sorted(counts.items(), key=lambda x: -x[1]):
+            print(f"  {cls:25s} {count}")
+            mlflow.log_metric(f"raw_count_{cls}", count)
+        mlflow.log_metric("elapsed_seconds", elapsed)
+        mlflow.log_metric("tiles_per_second", len(predictions) / elapsed)
 
-    smoothed = majority_filter(grid)
+        # Reassemble a 2D (row x col) map from "tile_ROW_COL" filenames, and
+        # smooth it with a majority filter to unify tiles into coherent regions.
+        parsed = []
+        for name, cls in predictions:
+            _, row_str, col_str = name.split("_")
+            parsed.append((int(row_str), int(col_str), cls))
 
-    MAPS_DIR.mkdir(parents=True, exist_ok=True)
-    np.save(MAPS_DIR / "land_use_grid.npy", grid)
-    np.save(MAPS_DIR / "land_use_grid_smoothed.npy", smoothed)
-    print(f"Saved {n_rows}x{n_cols} prediction grid to {MAPS_DIR}/land_use_grid.npy "
-          f"(+ land_use_grid_smoothed.npy, {SMOOTHING_WINDOW}x{SMOOTHING_WINDOW} majority filter)")
+        n_rows = max(row for row, _, _ in parsed) + 1
+        n_cols = max(col for _, col, _ in parsed) + 1
+        grid = np.full((n_rows, n_cols), "", dtype=object)
+        for row, col, cls in parsed:
+            grid[row, col] = cls
+
+        smoothed = majority_filter(grid)
+
+        changed = (grid != smoothed).sum()
+        mlflow.log_metric("pct_changed_by_smoothing", 100 * changed / grid.size)
+        smoothed_counts = Counter(smoothed.flatten())
+        for cls, count in smoothed_counts.items():
+            mlflow.log_metric(f"smoothed_count_{cls}", count)
+
+        MAPS_DIR.mkdir(parents=True, exist_ok=True)
+        grid_path = MAPS_DIR / "land_use_grid.npy"
+        smoothed_path = MAPS_DIR / "land_use_grid_smoothed.npy"
+        np.save(grid_path, grid)
+        np.save(smoothed_path, smoothed)
+        mlflow.log_artifact(grid_path)
+        mlflow.log_artifact(smoothed_path)
+        print(f"Saved {n_rows}x{n_cols} prediction grid to {MAPS_DIR}/land_use_grid.npy "
+              f"(+ land_use_grid_smoothed.npy, {SMOOTHING_WINDOW}x{SMOOTHING_WINDOW} majority filter)")
+        print(f"MLflow run: {mlflow.active_run().info.run_id}")

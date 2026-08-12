@@ -1,0 +1,16 @@
+apiVersion: ray.io/v1
+kind: RayJob
+metadata:
+  name: terra-inference-job
+spec:
+  entrypoint: python distributed_inference.py
+  shutdownAfterJobFinishes: false
+  clusterSelector:
+    ray.io/cluster: terra-ray-cluster
+  submitterPodTemplate:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: ray-job-submitter
+          image: terra:latest
+          imagePullPolicy: IfNotPresent

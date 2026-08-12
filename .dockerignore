@@ -6,7 +6,5 @@ __pycache__/
 data/eurosat/
 data/sentinel2_scene/
 data/sentinel2_tiles/
-models/*.pt
-models/*.pth
 .ipynb_checkpoints/
 mlruns/

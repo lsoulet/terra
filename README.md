@@ -31,7 +31,7 @@ In application code, always connect with `ray.init(address="auto")` rather than 
 docker build -t terra:latest .
 ```
 
-The image installs `requirements.txt` (including `torch` with bundled CUDA runtime and `ray[default]`) on top of `python:3.12-slim`. No CUDA toolkit is baked into the image — only the host's NVIDIA driver and CDI passthrough are required.
+The image installs `requirements.txt` (including `torch` with bundled CUDA runtime and `ray[default]`) on top of `python:3.12-slim`, and includes the trained checkpoint (`models/resnet18_eurosat_best.pt`, ~43MB — small enough to bake in directly). No CUDA toolkit is baked into the image — only the host's NVIDIA driver and CDI passthrough are required. Larger, regenerable data (`data/eurosat/`, `data/sentinel2_scene/`, `data/sentinel2_tiles/`) stays excluded via `.dockerignore`.
 
 ### Run
 
@@ -73,6 +73,16 @@ If you're working over VSCode Remote-SSH, forward ports 8888 and 8265 from the "
 docker exec terra-ray python distributed_tiling.py                # full scene, ~29,000 tiles, ~8 min
 docker exec terra-ray python distributed_tiling.py --max-rows 30  # demo-sized, ~5,000 tiles, ~1 min
 ```
+
+### Distributed inference
+
+`distributed_inference.py` classifies those tiles with the Phase 1 EuroSAT ResNet18, using a Ray actor that loads the model once and streams batches through it rather than reloading it per tile. Raw reflectance is calibrated with one fixed scale (not a per-tile stretch — see the script's docstring for why that matters) before normalization, then a 3x3 majority filter smooths the result into coherent regions.
+
+```bash
+docker exec terra-ray python distributed_inference.py
+```
+
+Outputs (`land_use_grid.npy`, `land_use_grid_smoothed.npy`) are saved under `data/sentinel2_tiles/land_use_maps/` — see `notebooks/05_land_use_map.ipynb` for visualizing the result.
 
 ### Operations
 
@@ -151,6 +161,23 @@ A `SUCCEEDED` status only means no task raised an exception — it doesn't guara
 
 ```bash
 kubectl exec deploy/terra-jupyter -- sh -c "ls data/sentinel2_tiles/*.npy | wc -l"
+```
+
+### Distributed inference
+
+Same script as the Docker environment, submitted as a `RayJob` (`infrastructure/ray-job-inference.yaml`):
+
+```bash
+kubectl delete rayjob terra-inference-job --ignore-not-found
+kubectl apply -f infrastructure/ray-job-inference.yaml
+kubectl get rayjob terra-inference-job -w
+kubectl logs -l job-name=terra-inference-job
+```
+
+Outputs land in `data/sentinel2_tiles/land_use_maps/` — already covered by the same PVC as the tiles (`tiles-pvc.yaml`), so no extra volume needed. Verify from any pod:
+
+```bash
+kubectl exec deploy/terra-jupyter -- sh -c "ls data/sentinel2_tiles/land_use_maps/"
 ```
 
 ### Operations

@@ -31,7 +31,7 @@ In application code, always connect with `ray.init(address="auto")` rather than 
 docker build -t terra:latest .
 ```
 
-The image installs `requirements.txt` (including `torch` with bundled CUDA runtime and `ray[default]`) on top of `python:3.12-slim`, and includes the trained checkpoint (`models/resnet18_eurosat_best.pt`, ~43MB — small enough to bake in directly). No CUDA toolkit is baked into the image — only the host's NVIDIA driver and CDI passthrough are required. Larger, regenerable data (`data/eurosat/`, `data/sentinel2_scene/`, `data/sentinel2_tiles/`) stays excluded via `.dockerignore`.
+The image installs `requirements.txt` (including `torch` with bundled CUDA runtime and `ray[default]`) on top of `python:3.12-slim`, and includes the trained checkpoint (`models/resnet18_eurosat_best.pt`, ~43MB — small enough to bake in directly). No CUDA toolkit is baked into the image — only the host's NVIDIA driver and CDI passthrough are required. Larger, regenerable data (`data/eurosat/`, `data/sentinel2_scene/`, `data/outputs/`) stays excluded via `.dockerignore`.
 
 ### Run
 
@@ -67,7 +67,7 @@ If you're working over VSCode Remote-SSH, forward ports 8888 and 8265 from the "
 
 ### Distributed tiling
 
-`distributed_tiling.py` splits a Sentinel-2 L1C scene into 64x64 tiles in parallel with Ray, saved as `.npy` files under `data/sentinel2_tiles/` (gitignored/dockerignored — generated data, not committed). It's self-contained: it looks up a low-cloud scene itself via the public Earth Search STAC API and reads each band directly over HTTPS (no local download needed — see `data/pull_sentinel_scene.py` instead if you just want a local copy of the scene to explore in a notebook).
+`distributed_tiling.py` splits a Sentinel-2 L1C scene into 64x64 tiles in parallel with Ray, saved as `.npy` files under `data/outputs/sentinel2_tiles/` (gitignored/dockerignored — generated data, not committed). It's self-contained: it looks up a low-cloud scene itself via the public Earth Search STAC API and reads each band directly over HTTPS (no local download needed — see `data/pull_sentinel_scene.py` instead if you just want a local copy of the scene to explore in a notebook).
 
 ```bash
 docker exec terra-ray python distributed_tiling.py                # full scene, ~29,000 tiles, ~8 min
@@ -82,7 +82,7 @@ docker exec terra-ray python distributed_tiling.py --max-rows 30  # demo-sized, 
 docker exec terra-ray python distributed_inference.py
 ```
 
-Outputs (`land_use_grid.npy`, `land_use_grid_smoothed.npy`) are saved under `data/sentinel2_tiles/land_use_maps/` — see `notebooks/05_land_use_map.ipynb` for visualizing the result.
+Outputs (`land_use_grid.npy`, `land_use_grid_smoothed.npy`) are saved under `data/outputs/land_use_maps/` — see `notebooks/05_land_use_map.ipynb` for visualizing the result.
 
 ### Operations
 
@@ -160,7 +160,7 @@ kubectl logs -l job-name=terra-tiling-job
 A `SUCCEEDED` status only means no task raised an exception — it doesn't guarantee the output is complete or in one place. Verify the tile count directly:
 
 ```bash
-kubectl exec deploy/terra-jupyter -- sh -c "ls data/sentinel2_tiles/*.npy | wc -l"
+kubectl exec deploy/terra-jupyter -- sh -c "ls data/outputs/sentinel2_tiles/*.npy | wc -l"
 ```
 
 ### Distributed inference
@@ -174,10 +174,10 @@ kubectl get rayjob terra-inference-job -w
 kubectl logs -l job-name=terra-inference-job
 ```
 
-Outputs land in `data/sentinel2_tiles/land_use_maps/` — already covered by the same PVC as the tiles (`tiles-pvc.yaml`), so no extra volume needed. Verify from any pod:
+Outputs land in `data/outputs/land_use_maps/` — already covered by the same PVC as the tiles (`tiles-pvc.yaml`), so no extra volume needed. Verify from any pod:
 
 ```bash
-kubectl exec deploy/terra-jupyter -- sh -c "ls data/sentinel2_tiles/land_use_maps/"
+kubectl exec deploy/terra-jupyter -- sh -c "ls data/outputs/land_use_maps/"
 ```
 
 ### Operations

@@ -26,6 +26,7 @@ import argparse
 import time
 from pathlib import Path
 
+import mlflow
 import numpy as np
 import rasterio
 import ray
@@ -36,7 +37,13 @@ STAC_URL = "https://earth-search.aws.element84.com/v1"
 COLLECTION = "sentinel-2-l1c"
 BBOX = [2.0, 48.6, 2.7, 49.0]  # Paris area
 TILE_SIZE = 64
-OUTPUT_DIR = Path("data/sentinel2_tiles")
+# OUTPUTS_DIR is the PVC mount point on KubeRay -- tiles, land-use maps, and
+# MLflow's tracking store are siblings under it (not nested inside each
+# other), each getting their own subfolder purely by what they are.
+OUTPUTS_DIR = Path("data/outputs")
+OUTPUT_DIR = OUTPUTS_DIR / "sentinel2_tiles"
+MLFLOW_TRACKING_DIR = OUTPUTS_DIR / "mlruns"
+MLFLOW_EXPERIMENT = "terra-distributed-tiling"
 
 
 def s3_to_https(href):
@@ -99,24 +106,55 @@ if __name__ == "__main__":
 
     ray.init(address="auto")
 
-    urls = find_scene_urls()
+    MLFLOW_TRACKING_DIR.mkdir(exist_ok=True)
+    mlflow.set_tracking_uri(f"sqlite:///{MLFLOW_TRACKING_DIR.resolve()}/mlflow.db")
 
-    with rasterio.open(f"/vsicurl/{urls['red']}") as src:
-        n_rows = src.height // TILE_SIZE
-        n_cols = src.width // TILE_SIZE
+    # A new experiment's default artifact_location is relative to the
+    # current working directory, NOT to the tracking store's location --
+    # left implicit, it silently recreates a stray ./mlruns wherever the
+    # script happens to run from. Pin it explicitly, once, at creation time.
+    client = mlflow.MlflowClient()
+    if client.get_experiment_by_name(MLFLOW_EXPERIMENT) is None:
+        client.create_experiment(
+            MLFLOW_EXPERIMENT,
+            artifact_location=str(MLFLOW_TRACKING_DIR.resolve() / "artifacts"),
+        )
+    mlflow.set_experiment(MLFLOW_EXPERIMENT)
 
-    if args.max_rows is not None:
-        n_rows = min(n_rows, args.max_rows)
+    with mlflow.start_run():
+        mlflow.log_params({
+            "tile_size": TILE_SIZE,
+            "max_rows": args.max_rows if args.max_rows is not None else "full",
+        })
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    print(f"Extracting {n_rows * n_cols} tiles ({n_rows}x{n_cols}) of {TILE_SIZE}x{TILE_SIZE}px, "
-          f"{n_rows} row-tasks...")
+        urls = find_scene_urls()
 
-    start = time.time()
-    futures = [extract_tile_row.remote(urls, row, n_cols) for row in range(n_rows)]
-    results = ray.get(futures)
-    elapsed = time.time() - start
+        with rasterio.open(f"/vsicurl/{urls['red']}") as src:
+            n_rows = src.height // TILE_SIZE
+            n_cols = src.width // TILE_SIZE
 
-    all_names = [name for row_names, _ in results for name in row_names]
-    total_size = sum(row_bytes for _, row_bytes in results)
-    print(f"Done: {len(all_names)} tiles in {elapsed:.1f}s ({total_size / 1e6:.1f} MB total)")
+        if args.max_rows is not None:
+            n_rows = min(n_rows, args.max_rows)
+
+        mlflow.log_params({"n_rows": n_rows, "n_cols": n_cols})
+
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        print(f"Extracting {n_rows * n_cols} tiles ({n_rows}x{n_cols}) of {TILE_SIZE}x{TILE_SIZE}px, "
+              f"{n_rows} row-tasks...")
+
+        start = time.time()
+        futures = [extract_tile_row.remote(urls, row, n_cols) for row in range(n_rows)]
+        results = ray.get(futures)
+        elapsed = time.time() - start
+
+        all_names = [name for row_names, _ in results for name in row_names]
+        total_size = sum(row_bytes for _, row_bytes in results)
+        print(f"Done: {len(all_names)} tiles in {elapsed:.1f}s ({total_size / 1e6:.1f} MB total)")
+
+        mlflow.log_metrics({
+            "n_tiles": len(all_names),
+            "elapsed_seconds": elapsed,
+            "tiles_per_second": len(all_names) / elapsed,
+            "total_size_mb": total_size / 1e6,
+        })
+        print(f"MLflow run: {mlflow.active_run().info.run_id}")

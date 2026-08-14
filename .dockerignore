@@ -5,6 +5,5 @@ __pycache__/
 .claude/
 data/eurosat/
 data/sentinel2_scene/
-data/sentinel2_tiles/
+data/outputs/
 .ipynb_checkpoints/
-mlruns/

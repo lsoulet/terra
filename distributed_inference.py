@@ -17,18 +17,25 @@ and clipped to [0,1] -- an approximation of EuroSAT's unknown original scale,
 but applied identically to every tile.
 """
 
+import time
 from collections import Counter
 from pathlib import Path
 
+import mlflow
 import numpy as np
 import ray
 
-TILES_DIR = Path("data/sentinel2_tiles")
-# Grid outputs live inside TILES_DIR (not a sibling of it) deliberately: on
-# KubeRay, only TILES_DIR is backed by the shared PVC -- saving here rather
-# than in TILES_DIR.parent keeps the result visible from every pod instead of
-# stuck on whichever one happened to run the driver.
-MAPS_DIR = TILES_DIR / "land_use_maps"
+# OUTPUTS_DIR is the PVC mount point on KubeRay -- tiles, land-use maps, and
+# MLflow's tracking store are siblings under it (not nested inside each
+# other), each getting their own subfolder purely by what they are. Anything
+# outside OUTPUTS_DIR is baked into the image at build time, not shared
+# across pods, so results saved elsewhere would be stuck on whichever pod
+# happened to run the driver.
+OUTPUTS_DIR = Path("data/outputs")
+TILES_DIR = OUTPUTS_DIR / "sentinel2_tiles"
+MAPS_DIR = OUTPUTS_DIR / "land_use_maps"
+MLFLOW_TRACKING_DIR = OUTPUTS_DIR / "mlruns"
+MLFLOW_EXPERIMENT = "terra-land-use-inference"
 CHECKPOINT_PATH = Path("models/resnet18_eurosat_best.pt")
 STATS_PATH = Path("data/eurosat_stats.json")
 REFLECTANCE_MAX = 3000
@@ -114,43 +121,85 @@ class TileClassifier:
 if __name__ == "__main__":
     ray.init(address="auto")
 
-    tile_paths = sorted(str(p) for p in TILES_DIR.glob("*.npy"))
-    print(f"Classifying {len(tile_paths)} tiles...")
+    # Plain filesystem tracking ("file:...") is in maintenance mode as of
+    # MLflow 3.x -- SQLite is the lightweight alternative: still a single
+    # local file, no separate server, but on the actively maintained path.
+    MLFLOW_TRACKING_DIR.mkdir(exist_ok=True)
+    mlflow.set_tracking_uri(f"sqlite:///{MLFLOW_TRACKING_DIR.resolve()}/mlflow.db")
 
-    classifier = TileClassifier.remote()
+    # A new experiment's default artifact_location is relative to the
+    # current working directory, NOT to the tracking store's location --
+    # left implicit, it silently recreates a stray ./mlruns wherever the
+    # script happens to run from. Pin it explicitly, once, at creation time.
+    client = mlflow.MlflowClient()
+    if client.get_experiment_by_name(MLFLOW_EXPERIMENT) is None:
+        client.create_experiment(
+            MLFLOW_EXPERIMENT,
+            artifact_location=str(MLFLOW_TRACKING_DIR.resolve() / "artifacts"),
+        )
+    mlflow.set_experiment(MLFLOW_EXPERIMENT)
 
-    futures = [
-        classifier.classify_batch.remote(tile_paths[i : i + BATCH_SIZE])
-        for i in range(0, len(tile_paths), BATCH_SIZE)
-    ]
-    results = ray.get(futures)
-    predictions = [item for batch in results for item in batch]
+    with mlflow.start_run():
+        mlflow.log_params({
+            "reflectance_max": REFLECTANCE_MAX,
+            "smoothing_window": SMOOTHING_WINDOW,
+            "batch_size": BATCH_SIZE,
+        })
 
-    counts = {}
-    for _, cls in predictions:
-        counts[cls] = counts.get(cls, 0) + 1
+        tile_paths = sorted(str(p) for p in TILES_DIR.glob("*.npy"))
+        print(f"Classifying {len(tile_paths)} tiles...")
+        mlflow.log_param("n_tiles", len(tile_paths))
 
-    print(f"Classified {len(predictions)} tiles. Predicted class counts:")
-    for cls, count in sorted(counts.items(), key=lambda x: -x[1]):
-        print(f"  {cls:25s} {count}")
+        classifier = TileClassifier.remote()
 
-    # Reassemble a 2D (row x col) map from "tile_ROW_COL" filenames, and
-    # smooth it with a majority filter to unify tiles into coherent regions.
-    parsed = []
-    for name, cls in predictions:
-        _, row_str, col_str = name.split("_")
-        parsed.append((int(row_str), int(col_str), cls))
+        start = time.time()
+        futures = [
+            classifier.classify_batch.remote(tile_paths[i : i + BATCH_SIZE])
+            for i in range(0, len(tile_paths), BATCH_SIZE)
+        ]
+        results = ray.get(futures)
+        elapsed = time.time() - start
+        predictions = [item for batch in results for item in batch]
 
-    n_rows = max(row for row, _, _ in parsed) + 1
-    n_cols = max(col for _, col, _ in parsed) + 1
-    grid = np.full((n_rows, n_cols), "", dtype=object)
-    for row, col, cls in parsed:
-        grid[row, col] = cls
+        counts = {}
+        for _, cls in predictions:
+            counts[cls] = counts.get(cls, 0) + 1
 
-    smoothed = majority_filter(grid)
+        print(f"Classified {len(predictions)} tiles in {elapsed:.1f}s. Predicted class counts:")
+        for cls, count in sorted(counts.items(), key=lambda x: -x[1]):
+            print(f"  {cls:25s} {count}")
+            mlflow.log_metric(f"raw_count_{cls}", count)
+        mlflow.log_metric("elapsed_seconds", elapsed)
+        mlflow.log_metric("tiles_per_second", len(predictions) / elapsed)
 
-    MAPS_DIR.mkdir(parents=True, exist_ok=True)
-    np.save(MAPS_DIR / "land_use_grid.npy", grid)
-    np.save(MAPS_DIR / "land_use_grid_smoothed.npy", smoothed)
-    print(f"Saved {n_rows}x{n_cols} prediction grid to {MAPS_DIR}/land_use_grid.npy "
-          f"(+ land_use_grid_smoothed.npy, {SMOOTHING_WINDOW}x{SMOOTHING_WINDOW} majority filter)")
+        # Reassemble a 2D (row x col) map from "tile_ROW_COL" filenames, and
+        # smooth it with a majority filter to unify tiles into coherent regions.
+        parsed = []
+        for name, cls in predictions:
+            _, row_str, col_str = name.split("_")
+            parsed.append((int(row_str), int(col_str), cls))
+
+        n_rows = max(row for row, _, _ in parsed) + 1
+        n_cols = max(col for _, col, _ in parsed) + 1
+        grid = np.full((n_rows, n_cols), "", dtype=object)
+        for row, col, cls in parsed:
+            grid[row, col] = cls
+
+        smoothed = majority_filter(grid)
+
+        changed = (grid != smoothed).sum()
+        mlflow.log_metric("pct_changed_by_smoothing", 100 * changed / grid.size)
+        smoothed_counts = Counter(smoothed.flatten())
+        for cls, count in smoothed_counts.items():
+            mlflow.log_metric(f"smoothed_count_{cls}", count)
+
+        MAPS_DIR.mkdir(parents=True, exist_ok=True)
+        grid_path = MAPS_DIR / "land_use_grid.npy"
+        smoothed_path = MAPS_DIR / "land_use_grid_smoothed.npy"
+        np.save(grid_path, grid)
+        np.save(smoothed_path, smoothed)
+        mlflow.log_artifact(grid_path)
+        mlflow.log_artifact(smoothed_path)
+        print(f"Saved {n_rows}x{n_cols} prediction grid to {MAPS_DIR}/land_use_grid.npy "
+              f"(+ land_use_grid_smoothed.npy, {SMOOTHING_WINDOW}x{SMOOTHING_WINDOW} majority filter)")
+        print(f"MLflow run: {mlflow.active_run().info.run_id}")

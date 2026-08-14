@@ -32,7 +32,7 @@ spec:
               memory: "4Gi"
           volumeMounts:
             - name: tiles
-              mountPath: /app/data/sentinel2_tiles
+              mountPath: /app/data/outputs
       volumes:
         - name: tiles
           persistentVolumeClaim:

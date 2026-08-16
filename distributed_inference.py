@@ -38,7 +38,10 @@ MLFLOW_TRACKING_DIR = OUTPUTS_DIR / "mlruns"
 MLFLOW_EXPERIMENT = "terra-land-use-inference"
 CHECKPOINT_PATH = Path("models/resnet18_eurosat_best.pt")
 STATS_PATH = Path("data/eurosat_stats.json")
-REFLECTANCE_MAX = 3000
+REFLECTANCE_MAX = 5600  # picked by calibrate_reflectance.py: minimizes distance
+# between calibrated real-tile mean/std and EuroSAT's own (see that script's
+# docstring) -- was 3000 (a physically-plausible guess), no ground truth on
+# the real scene to check accuracy directly against.
 BATCH_SIZE = 64
 SMOOTHING_WINDOW = 3
 

@@ -23,6 +23,42 @@ In application code, always connect with `ray.init(address="auto")` rather than 
 
 ---
 
+## Experiment tracking (MLflow)
+
+`distributed_tiling.py`, `distributed_inference.py`, `calibrate_reflectance.py`, and `train_hparam_search.py` all log params/metrics/artifacts to a local MLflow tracking store at `data/outputs/mlruns/mlflow.db` (SQLite backend — MLflow 3.x's plain filesystem store is deprecated). Each script owns its own experiment:
+
+| Experiment | Script | What it tracks |
+|---|---|---|
+| `terra-distributed-tiling` | `distributed_tiling.py` | tile counts, throughput |
+| `terra-land-use-inference` | `distributed_inference.py` | class distribution, smoothing effect |
+| `terra-reflectance-calibration` | `calibrate_reflectance.py` | `REFLECTANCE_MAX` search vs. EuroSAT's own pixel distribution |
+| `terra-hparam-search` | `train_hparam_search.py` | per-epoch train/val curves for each hyperparameter config |
+
+### UI
+
+```bash
+docker run -d --rm \
+  --name terra-mlflow \
+  -p 5000:5000 \
+  -v $(pwd):/app \
+  terra:latest \
+  sh -c "mlflow ui --backend-store-uri sqlite:///data/outputs/mlruns/mlflow.db --host 0.0.0.0 --port 5000"
+```
+
+Open `http://localhost:5000`. Select runs in an experiment and click **Compare** to chart a metric against a param across all of them — e.g. `distance_to_eurosat` vs. `reflectance_max` in `terra-reflectance-calibration`, or the per-epoch `val_acc` curves in `terra-hparam-search`.
+
+**Gotcha — stale file handle**: this container holds `mlflow.db` open for as long as it runs. If that file ever gets deleted and recreated (e.g. wiping `data/outputs/mlruns/` to reset tracking), the container keeps serving the old, now-unlinked file instead of the new one — new runs silently stop appearing in the UI. Fix: `docker restart terra-mlflow`.
+
+**Gotcha — Docker and KubeRay don't share this store**: the UI above reads the host bind-mount (`data/outputs/` in the repo). KubeRay's `terra-tiles-pvc` is a *separate* volume backed by a directory inside the minikube VM, not the host repo — so a `RayJob` run on KubeRay writes to a different `mlflow.db` entirely, invisible to the UI above. To inspect that one, run `mlflow ui` from a pod that has the PVC mounted instead:
+
+```bash
+kubectl exec deploy/terra-jupyter -- sh -c \
+  "mlflow ui --backend-store-uri sqlite:///data/outputs/mlruns/mlflow.db --host 0.0.0.0 --port 5000 &"
+kubectl port-forward deploy/terra-jupyter 5001:5000
+```
+
+---
+
 ## Docker environment
 
 ### Build
@@ -83,6 +119,26 @@ docker exec terra-ray python distributed_inference.py
 ```
 
 Outputs (`land_use_grid.npy`, `land_use_grid_smoothed.npy`) are saved under `data/outputs/land_use_maps/` — see `notebooks/05_land_use_map.ipynb` for visualizing the result.
+
+### Reflectance calibration search
+
+`calibrate_reflectance.py` picks `REFLECTANCE_MAX` (the fixed constant `distributed_inference.py` divides raw tiles by before feeding them to the model) by matching a sample of real tiles' mean/std to EuroSAT's own — a label-free proxy for calibration quality, since there's no ground truth for the real scene. Not Ray-parallelized: it's a small local computation on already-downloaded tiles, no meaningful distributed-systems problem to justify it.
+
+```bash
+docker exec terra-ray python calibrate_reflectance.py
+```
+
+Prints and logs (to `terra-reflectance-calibration`) the distance-to-EuroSAT for each candidate value; the best one gets copied into `REFLECTANCE_MAX` in `distributed_inference.py` by hand.
+
+### Hyperparameter search
+
+`train_hparam_search.py` reruns notebook 2's fine-tuning loop with several hyperparameter configs at once, comparing them under identical data/seed conditions. There's only one physical GPU on this cluster, so "at once" means several Ray tasks sharing it through a fractional allocation (`num_gpus=0.25` each) rather than true multi-GPU parallelism — CUDA doesn't isolate that budget, so they genuinely run concurrently on the device.
+
+```bash
+docker exec terra-ray python train_hparam_search.py
+```
+
+Prints a ranked summary (best `val_acc` first) and logs every config, with its full per-epoch curve, to `terra-hparam-search`.
 
 ### Operations
 

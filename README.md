@@ -98,17 +98,17 @@ If you're working over VSCode Remote-SSH, forward ports 8888 and 8265 from the "
 2. **Ray dashboard** — open `http://localhost:8265`.
 3. **Cluster smoke test**:
    ```bash
-   docker exec terra-ray python test_ray_cluster.py
+   docker exec terra-ray python scripts/test_ray_cluster.py
    ```
-   (or from a Jupyter cell: `%run test_ray_cluster.py`). It checks that `ray.init(address="auto")` connects, that tasks actually run in parallel, and that a GPU-declared Ray actor can see the GPU via `torch.cuda.is_available()`.
+   (or from a Jupyter cell: `%run scripts/test_ray_cluster.py`). It checks that `ray.init(address="auto")` connects, that tasks actually run in parallel, and that a GPU-declared Ray actor can see the GPU via `torch.cuda.is_available()`.
 
 ### Distributed tiling
 
 `distributed_tiling.py` splits a Sentinel-2 L1C scene into 64x64 tiles in parallel with Ray, saved as `.npy` files under `data/outputs/sentinel2_tiles/` (gitignored/dockerignored — generated data, not committed). It's self-contained: it looks up a low-cloud scene itself via the public Earth Search STAC API and reads each band directly over HTTPS (no local download needed — see `data/pull_sentinel_scene.py` instead if you just want a local copy of the scene to explore in a notebook).
 
 ```bash
-docker exec terra-ray python distributed_tiling.py                # full scene, ~29,000 tiles, ~8 min
-docker exec terra-ray python distributed_tiling.py --max-rows 30  # demo-sized, ~5,000 tiles, ~1 min
+docker exec terra-ray python scripts/distributed_tiling.py                # full scene, ~29,000 tiles, ~8 min
+docker exec terra-ray python scripts/distributed_tiling.py --max-rows 30  # demo-sized, ~5,000 tiles, ~1 min
 ```
 
 ### Distributed inference
@@ -116,7 +116,7 @@ docker exec terra-ray python distributed_tiling.py --max-rows 30  # demo-sized, 
 `distributed_inference.py` classifies those tiles with the Phase 1 EuroSAT ResNet18, using a Ray actor that loads the model once and streams batches through it rather than reloading it per tile. Raw reflectance is calibrated with one fixed scale (not a per-tile stretch — see the script's docstring for why that matters) before normalization, then a 3x3 majority filter smooths the result into coherent regions.
 
 ```bash
-docker exec terra-ray python distributed_inference.py
+docker exec terra-ray python scripts/distributed_inference.py
 ```
 
 Outputs (`land_use_grid.npy`, `land_use_grid_smoothed.npy`) are saved under `data/outputs/land_use_maps/` — see `notebooks/05_land_use_map.ipynb` for visualizing the result.
@@ -126,7 +126,7 @@ Outputs (`land_use_grid.npy`, `land_use_grid_smoothed.npy`) are saved under `dat
 `calibrate_reflectance.py` picks `REFLECTANCE_MAX` (the fixed constant `distributed_inference.py` divides raw tiles by before feeding them to the model) by matching a sample of real tiles' mean/std to EuroSAT's own — a label-free proxy for calibration quality, since there's no ground truth for the real scene. Not Ray-parallelized: it's a small local computation on already-downloaded tiles, no meaningful distributed-systems problem to justify it.
 
 ```bash
-docker exec terra-ray python calibrate_reflectance.py
+docker exec terra-ray python scripts/calibrate_reflectance.py
 ```
 
 Prints and logs (to `terra-reflectance-calibration`) the distance-to-EuroSAT for each candidate value; the best one gets copied into `REFLECTANCE_MAX` in `distributed_inference.py` by hand.
@@ -136,7 +136,7 @@ Prints and logs (to `terra-reflectance-calibration`) the distance-to-EuroSAT for
 `train_hparam_search.py` reruns notebook 2's fine-tuning loop with several hyperparameter configs at once, comparing them under identical data/seed conditions. There's only one physical GPU on this cluster, so "at once" means several Ray tasks sharing it through a fractional allocation (`num_gpus=0.25` each) rather than true multi-GPU parallelism — CUDA doesn't isolate that budget, so they genuinely run concurrently on the device.
 
 ```bash
-docker exec terra-ray python train_hparam_search.py
+docker exec terra-ray python scripts/train_hparam_search.py
 ```
 
 Prints a ranked summary (best `val_acc` first) and logs every config, with its full per-epoch curve, to `terra-hparam-search`.

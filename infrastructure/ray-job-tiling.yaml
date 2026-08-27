@@ -3,7 +3,7 @@ kind: RayJob
 metadata:
   name: terra-tiling-job
 spec:
-  entrypoint: python distributed_tiling.py --max-rows 30
+  entrypoint: python scripts/distributed_tiling.py --max-rows 30
   shutdownAfterJobFinishes: false
   clusterSelector:
     ray.io/cluster: terra-ray-cluster

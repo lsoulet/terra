@@ -3,7 +3,7 @@ kind: RayJob
 metadata:
   name: terra-test-job
 spec:
-  entrypoint: python test_ray_cluster.py
+  entrypoint: python scripts/test_ray_cluster.py
   shutdownAfterJobFinishes: false
   clusterSelector:
     ray.io/cluster: terra-ray-cluster

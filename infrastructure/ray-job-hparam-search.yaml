@@ -1,0 +1,16 @@
+apiVersion: ray.io/v1
+kind: RayJob
+metadata:
+  name: terra-hparam-search-job
+spec:
+  entrypoint: python train_hparam_search.py
+  shutdownAfterJobFinishes: false
+  clusterSelector:
+    ray.io/cluster: terra-ray-cluster
+  submitterPodTemplate:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: ray-job-submitter
+          image: terra:latest
+          imagePullPolicy: IfNotPresent

@@ -48,9 +48,7 @@ SEED = 42
 
 # Same 3 axes discussed: learning rate, optimizer, and how much of the
 # pretrained backbone stays trainable. "baseline" reproduces notebook 2's
-# config exactly, so its result here is a sanity check against the known
-# 97.43% -- not directly comparable (5 epochs here vs. 10 there), but should
-# track the same shape of learning curve.
+# config exactly, so its result here is a sanity check against the known 97.43%
 CONFIGS = [
     {"name": "baseline", "optimizer": "adam", "lr": 1e-4, "freeze_backbone": False, "weight_decay": 0.0},
     {"name": "higher_lr", "optimizer": "adam", "lr": 3e-4, "freeze_backbone": False, "weight_decay": 0.0},

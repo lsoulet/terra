@@ -21,6 +21,20 @@ The intended flow: prototype interactively in the Docker Jupyter, then once code
 
 In application code, always connect with `ray.init(address="auto")` rather than a bare `ray.init()` — this attaches to whatever cluster is already running (Docker's single-node cluster or the KubeRay-managed one) without any code changes.
 
+## Tests and CI
+
+`tests/` covers the pure, CPU-only helper functions in each script (`calibrate()`, `majority_filter()`, `s3_to_https()`) — the parts that are both deterministic and don't need a GPU, a Ray cluster, or real network access, which rules out testing the scripts end-to-end here.
+
+```bash
+pip install -r requirements-dev.txt
+pytest -v
+ruff check .
+```
+
+`requirements-dev.txt` is deliberately separate from `requirements.txt` — it skips torch and its bundled CUDA runtime (most of the production image's ~10GB), since nothing the tests import needs them.
+
+`.github/workflows/ci.yml` runs lint (`ruff`), the unit tests (`pytest`), and YAML validation (`yamllint infrastructure/`) on every push/PR; the Docker image itself is only rebuilt when `Dockerfile`/`requirements.txt`/`entrypoint.sh` actually change.
+
 ---
 
 ## Experiment tracking (MLflow)
@@ -49,13 +63,14 @@ Open `http://localhost:5000`. Select runs in an experiment and click **Compare**
 
 **Gotcha — stale file handle**: this container holds `mlflow.db` open for as long as it runs. If that file ever gets deleted and recreated (e.g. wiping `data/outputs/mlruns/` to reset tracking), the container keeps serving the old, now-unlinked file instead of the new one — new runs silently stop appearing in the UI. Fix: `docker restart terra-mlflow`.
 
-**Gotcha — Docker and KubeRay don't share this store**: the UI above reads the host bind-mount (`data/outputs/` in the repo). KubeRay's `terra-tiles-pvc` is a *separate* volume backed by a directory inside the minikube VM, not the host repo — so a `RayJob` run on KubeRay writes to a different `mlflow.db` entirely, invisible to the UI above. To inspect that one, run `mlflow ui` from a pod that has the PVC mounted instead:
+**Gotcha — Docker and KubeRay don't share this store**: the UI above reads the host bind-mount (`data/outputs/` in the repo). KubeRay's `terra-tiles-pvc` is a *separate* volume backed by a directory inside the minikube VM, not the host repo — so a `RayJob` run on KubeRay writes to a different `mlflow.db` entirely, invisible to the UI above. `infrastructure/mlflow.yaml` deploys the same UI as its own pod on the KubeRay side, with the PVC mounted, so it can read that store instead:
 
 ```bash
-kubectl exec deploy/terra-jupyter -- sh -c \
-  "mlflow ui --backend-store-uri sqlite:///data/outputs/mlruns/mlflow.db --host 0.0.0.0 --port 5000 &"
-kubectl port-forward deploy/terra-jupyter 5001:5000
+kubectl apply -f infrastructure/mlflow.yaml
+kubectl port-forward svc/terra-mlflow-svc 5001:5000
 ```
+
+**Gotcha — default memory limit OOM-kills this pod**: `mlflow ui` spawns 4 uvicorn worker processes by default, using more memory than the Docker container (which has no memory limit) ever revealed — `2Gi` gets the pod `OOMKilled` within a minute of startup, with no error beyond a silently-restarting pod and connection-refused errors on port-forward. `mlflow.yaml` sets `4Gi`, which is stable.
 
 ---
 
@@ -97,17 +112,17 @@ If you're working over VSCode Remote-SSH, forward ports 8888 and 8265 from the "
 2. **Ray dashboard** — open `http://localhost:8265`.
 3. **Cluster smoke test**:
    ```bash
-   docker exec terra-ray python test_ray_cluster.py
+   docker exec terra-ray python scripts/test_ray_cluster.py
    ```
-   (or from a Jupyter cell: `%run test_ray_cluster.py`). It checks that `ray.init(address="auto")` connects, that tasks actually run in parallel, and that a GPU-declared Ray actor can see the GPU via `torch.cuda.is_available()`.
+   (or from a Jupyter cell: `%run scripts/test_ray_cluster.py`). It checks that `ray.init(address="auto")` connects, that tasks actually run in parallel, and that a GPU-declared Ray actor can see the GPU via `torch.cuda.is_available()`.
 
 ### Distributed tiling
 
 `distributed_tiling.py` splits a Sentinel-2 L1C scene into 64x64 tiles in parallel with Ray, saved as `.npy` files under `data/outputs/sentinel2_tiles/` (gitignored/dockerignored — generated data, not committed). It's self-contained: it looks up a low-cloud scene itself via the public Earth Search STAC API and reads each band directly over HTTPS (no local download needed — see `data/pull_sentinel_scene.py` instead if you just want a local copy of the scene to explore in a notebook).
 
 ```bash
-docker exec terra-ray python distributed_tiling.py                # full scene, ~29,000 tiles, ~8 min
-docker exec terra-ray python distributed_tiling.py --max-rows 30  # demo-sized, ~5,000 tiles, ~1 min
+docker exec terra-ray python scripts/distributed_tiling.py                # full scene, ~29,000 tiles, ~8 min
+docker exec terra-ray python scripts/distributed_tiling.py --max-rows 30  # demo-sized, ~5,000 tiles, ~1 min
 ```
 
 ### Distributed inference
@@ -115,7 +130,7 @@ docker exec terra-ray python distributed_tiling.py --max-rows 30  # demo-sized, 
 `distributed_inference.py` classifies those tiles with the Phase 1 EuroSAT ResNet18, using a Ray actor that loads the model once and streams batches through it rather than reloading it per tile. Raw reflectance is calibrated with one fixed scale (not a per-tile stretch — see the script's docstring for why that matters) before normalization, then a 3x3 majority filter smooths the result into coherent regions.
 
 ```bash
-docker exec terra-ray python distributed_inference.py
+docker exec terra-ray python scripts/distributed_inference.py
 ```
 
 Outputs (`land_use_grid.npy`, `land_use_grid_smoothed.npy`) are saved under `data/outputs/land_use_maps/` — see `notebooks/05_land_use_map.ipynb` for visualizing the result.
@@ -125,7 +140,7 @@ Outputs (`land_use_grid.npy`, `land_use_grid_smoothed.npy`) are saved under `dat
 `calibrate_reflectance.py` picks `REFLECTANCE_MAX` (the fixed constant `distributed_inference.py` divides raw tiles by before feeding them to the model) by matching a sample of real tiles' mean/std to EuroSAT's own — a label-free proxy for calibration quality, since there's no ground truth for the real scene. Not Ray-parallelized: it's a small local computation on already-downloaded tiles, no meaningful distributed-systems problem to justify it.
 
 ```bash
-docker exec terra-ray python calibrate_reflectance.py
+docker exec terra-ray python scripts/calibrate_reflectance.py
 ```
 
 Prints and logs (to `terra-reflectance-calibration`) the distance-to-EuroSAT for each candidate value; the best one gets copied into `REFLECTANCE_MAX` in `distributed_inference.py` by hand.
@@ -135,7 +150,7 @@ Prints and logs (to `terra-reflectance-calibration`) the distance-to-EuroSAT for
 `train_hparam_search.py` reruns notebook 2's fine-tuning loop with several hyperparameter configs at once, comparing them under identical data/seed conditions. There's only one physical GPU on this cluster, so "at once" means several Ray tasks sharing it through a fractional allocation (`num_gpus=0.25` each) rather than true multi-GPU parallelism — CUDA doesn't isolate that budget, so they genuinely run concurrently on the device.
 
 ```bash
-docker exec terra-ray python train_hparam_search.py
+docker exec terra-ray python scripts/train_hparam_search.py
 ```
 
 Prints a ranked summary (best `val_acc` first) and logs every config, with its full per-epoch curve, to `terra-hparam-search`.
@@ -172,7 +187,9 @@ minikube image load terra:latest
 kubectl apply -f infrastructure/tiles-pvc.yaml
 kubectl apply -f infrastructure/ray-cluster.yaml
 kubectl apply -f infrastructure/jupyter.yaml
+kubectl apply -f infrastructure/mlflow.yaml
 kubectl port-forward svc/terra-jupyter-svc 8890:8888
+kubectl port-forward svc/terra-mlflow-svc 5001:5000
 ```
 
 `tiles-pvc.yaml` is a shared volume (mounted at the same path on the head, worker, and Jupyter pods) for `distributed_tiling.py`'s output — without it, each pod writes tiles to its own local disk, and a `RayJob` can report `SUCCEEDED` while the output ends up scattered across pods with no single place containing all of it.

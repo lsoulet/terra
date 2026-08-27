@@ -3,7 +3,7 @@ kind: RayJob
 metadata:
   name: terra-inference-job
 spec:
-  entrypoint: python distributed_inference.py
+  entrypoint: python scripts/distributed_inference.py
   shutdownAfterJobFinishes: false
   clusterSelector:
     ray.io/cluster: terra-ray-cluster

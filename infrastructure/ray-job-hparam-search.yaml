@@ -3,7 +3,7 @@ kind: RayJob
 metadata:
   name: terra-hparam-search-job
 spec:
-  entrypoint: python train_hparam_search.py
+  entrypoint: python scripts/train_hparam_search.py
   shutdownAfterJobFinishes: false
   clusterSelector:
     ray.io/cluster: terra-ray-cluster

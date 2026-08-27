@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: terra-mlflow
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: terra-mlflow
+  template:
+    metadata:
+      labels:
+        app: terra-mlflow
+    spec:
+      containers:
+        - name: mlflow
+          image: terra:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - mlflow
+            - ui
+            - --backend-store-uri
+            - sqlite:///data/outputs/mlruns/mlflow.db
+            - --host
+            - "0.0.0.0"
+            - --port
+            - "5000"
+          ports:
+            - containerPort: 5000
+              name: mlflow
+          resources:
+            requests:
+              cpu: "1"
+              memory: "4Gi"
+            limits:
+              cpu: "1"
+              memory: "4Gi"
+          volumeMounts:
+            - name: tiles
+              mountPath: /app/data/outputs
+      volumes:
+        - name: tiles
+          persistentVolumeClaim:
+            claimName: terra-tiles-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: terra-mlflow-svc
+spec:
+  selector:
+    app: terra-mlflow
+  ports:
+    - port: 5000
+      targetPort: 5000

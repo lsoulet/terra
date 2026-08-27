@@ -49,13 +49,14 @@ Open `http://localhost:5000`. Select runs in an experiment and click **Compare**
 
 **Gotcha — stale file handle**: this container holds `mlflow.db` open for as long as it runs. If that file ever gets deleted and recreated (e.g. wiping `data/outputs/mlruns/` to reset tracking), the container keeps serving the old, now-unlinked file instead of the new one — new runs silently stop appearing in the UI. Fix: `docker restart terra-mlflow`.
 
-**Gotcha — Docker and KubeRay don't share this store**: the UI above reads the host bind-mount (`data/outputs/` in the repo). KubeRay's `terra-tiles-pvc` is a *separate* volume backed by a directory inside the minikube VM, not the host repo — so a `RayJob` run on KubeRay writes to a different `mlflow.db` entirely, invisible to the UI above. To inspect that one, run `mlflow ui` from a pod that has the PVC mounted instead:
+**Gotcha — Docker and KubeRay don't share this store**: the UI above reads the host bind-mount (`data/outputs/` in the repo). KubeRay's `terra-tiles-pvc` is a *separate* volume backed by a directory inside the minikube VM, not the host repo — so a `RayJob` run on KubeRay writes to a different `mlflow.db` entirely, invisible to the UI above. `infrastructure/mlflow.yaml` deploys the same UI as its own pod on the KubeRay side, with the PVC mounted, so it can read that store instead:
 
 ```bash
-kubectl exec deploy/terra-jupyter -- sh -c \
-  "mlflow ui --backend-store-uri sqlite:///data/outputs/mlruns/mlflow.db --host 0.0.0.0 --port 5000 &"
-kubectl port-forward deploy/terra-jupyter 5001:5000
+kubectl apply -f infrastructure/mlflow.yaml
+kubectl port-forward svc/terra-mlflow-svc 5001:5000
 ```
+
+**Gotcha — default memory limit OOM-kills this pod**: `mlflow ui` spawns 4 uvicorn worker processes by default, using more memory than the Docker container (which has no memory limit) ever revealed — `2Gi` gets the pod `OOMKilled` within a minute of startup, with no error beyond a silently-restarting pod and connection-refused errors on port-forward. `mlflow.yaml` sets `4Gi`, which is stable.
 
 ---
 
@@ -172,7 +173,9 @@ minikube image load terra:latest
 kubectl apply -f infrastructure/tiles-pvc.yaml
 kubectl apply -f infrastructure/ray-cluster.yaml
 kubectl apply -f infrastructure/jupyter.yaml
+kubectl apply -f infrastructure/mlflow.yaml
 kubectl port-forward svc/terra-jupyter-svc 8890:8888
+kubectl port-forward svc/terra-mlflow-svc 5001:5000
 ```
 
 `tiles-pvc.yaml` is a shared volume (mounted at the same path on the head, worker, and Jupyter pods) for `distributed_tiling.py`'s output — without it, each pod writes tiles to its own local disk, and a `RayJob` can report `SUCCEEDED` while the output ends up scattered across pods with no single place containing all of it.

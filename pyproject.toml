@@ -1,0 +1,15 @@
+[tool.pytest.ini_options]
+# Lets tests import distributed_inference.py / distributed_tiling.py etc.
+# directly (python scripts/foo.py's own convention -- no package structure,
+# no __init__.py) without needing sys.path hacks in every test file.
+pythonpath = ["scripts"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+# E501 (line too long) is handled by line-length above; ignore the common
+# false positives on this codebase's style (module-level imports deferred
+# inside functions for Ray serialization, documented inline each time).
+ignore = ["E731"]

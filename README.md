@@ -21,6 +21,20 @@ The intended flow: prototype interactively in the Docker Jupyter, then once code
 
 In application code, always connect with `ray.init(address="auto")` rather than a bare `ray.init()` — this attaches to whatever cluster is already running (Docker's single-node cluster or the KubeRay-managed one) without any code changes.
 
+## Tests and CI
+
+`tests/` covers the pure, CPU-only helper functions in each script (`calibrate()`, `majority_filter()`, `s3_to_https()`) — the parts that are both deterministic and don't need a GPU, a Ray cluster, or real network access, which rules out testing the scripts end-to-end here.
+
+```bash
+pip install -r requirements-dev.txt
+pytest -v
+ruff check .
+```
+
+`requirements-dev.txt` is deliberately separate from `requirements.txt` — it skips torch and its bundled CUDA runtime (most of the production image's ~10GB), since nothing the tests import needs them.
+
+`.github/workflows/ci.yml` runs lint (`ruff`), the unit tests (`pytest`), and YAML validation (`yamllint infrastructure/`) on every push/PR; the Docker image itself is only rebuilt when `Dockerfile`/`requirements.txt`/`entrypoint.sh` actually change.
+
 ---
 
 ## Experiment tracking (MLflow)

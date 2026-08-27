@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff==0.9.2
+      - run: ruff check .
+
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      # requirements-dev.txt, not requirements.txt: the unit tests only
+      # touch the pure, CPU-only helpers in each script (calibrate(),
+      # majority_filter(), s3_to_https()) -- torch and its bundled CUDA
+      # runtime (most of what requirements.txt installs) are never imported
+      # by them, so there's nothing to gain from paying for that install
+      # on every push.
+      - run: pip install -r requirements-dev.txt
+      - run: pytest -v
+
+  yaml-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install yamllint==1.35.1
+      - run: yamllint infrastructure/
+
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      docker: ${{ steps.filter.outputs.docker }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            docker:
+              - 'Dockerfile'
+              - 'requirements.txt'
+              - 'entrypoint.sh'
+
+  docker-build:
+    needs: changes
+    # Only when something that actually affects the image changed -- it
+    # bakes in torch + CUDA (~10GB), so building it on every push regardless
+    # of what changed would burn CI minutes for no reason.
+    if: needs.changes.outputs.docker == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t terra:ci .

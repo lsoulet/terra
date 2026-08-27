@@ -1,0 +1,8 @@
+extends: default
+
+rules:
+  # This repo's manifests never use the `---` document marker -- a style
+  # choice, not a correctness issue, not worth rewriting every file for.
+  document-start: disable
+  line-length:
+    max: 120
